@@ -74,3 +74,10 @@ pub struct KeyData {
     pub public_key: String,
     pub encrypted_private_key: String,
 }
+
+// For DELETE /accounts request
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAccountRequest {
+    pub master_password_hash: String,
+}

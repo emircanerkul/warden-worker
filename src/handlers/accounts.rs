@@ -1,5 +1,6 @@
 use axum::{extract::State, Json};
 use chrono::Utc;
+use constant_time_eq::constant_time_eq;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -8,7 +9,7 @@ use worker::{query, Env};
 use crate::{
     db,
     error::AppError,
-    models::user::{PreloginResponse, RegisterRequest, User},
+    models::user::{DeleteAccountRequest, PreloginResponse, RegisterRequest, User},
     auth::Claims,
 };
 
@@ -126,4 +127,64 @@ pub async fn revision_date(
         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
     
     Ok(Json(revision_date))
+}
+
+#[worker::send]
+pub async fn delete_account(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Json(payload): Json<DeleteAccountRequest>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let user_id = &claims.sub;
+
+    // Get the user from the database
+    let user: Value = db
+        .prepare("SELECT * FROM users WHERE id = ?1")
+        .bind(&[user_id.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+    let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
+
+    // Verify the master password hash
+    if !constant_time_eq(
+        user.master_password_hash.as_bytes(),
+        payload.master_password_hash.as_bytes(),
+    ) {
+        return Err(AppError::Unauthorized("Invalid password".to_string()));
+    }
+
+    // Delete all user's ciphers
+    query!(
+        &db,
+        "DELETE FROM ciphers WHERE user_id = ?1",
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    // Delete all user's folders
+    query!(
+        &db,
+        "DELETE FROM folders WHERE user_id = ?1",
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    // Delete the user
+    query!(
+        &db,
+        "DELETE FROM users WHERE id = ?1",
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    Ok(Json(json!({})))
 }
