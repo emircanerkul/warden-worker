@@ -88,7 +88,7 @@ impl NumberOrString {
 }
 
 async fn touch_cipher_updated_at(db: &D1Database, cipher_id: &str) -> Result<(), AppError> {
-    let now = now_string();
+    let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
     query!(
         db,
         "UPDATE ciphers SET updated_at = ?1 WHERE id = ?2",
