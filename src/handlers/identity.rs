@@ -1,14 +1,16 @@
 use axum::{extract::State, Form, Json};
 use chrono::{Duration, Utc};
 use constant_time_eq::constant_time_eq;
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header};
+use hmac::{Hmac, Mac};
+use jwt::{SignWithKey, VerifyWithKey};
+use sha2::Sha256;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use worker::{query, Env};
 
 use crate::{
-    auth::{jwt_validation, Claims},
+    auth::Claims,
     crypto::{ct_eq, generate_salt, hash_password_for_storage, validate_totp},
     db,
     error::AppError,
@@ -148,11 +150,9 @@ fn generate_tokens_and_response(
     };
 
     let jwt_secret = env.secret("JWT_SECRET")?.to_string();
-    let access_token = encode(
-        &Header::default(),
-        &access_claims,
-        &EncodingKey::from_secret(jwt_secret.as_ref()),
-    )?;
+    let key: Hmac<Sha256> = Hmac::new_from_slice(jwt_secret.as_bytes())
+        .map_err(|_| AppError::Internal)?;
+    let access_token = access_claims.sign_with_key(&key)?;
 
     let refresh_expires_in = Duration::days(30);
     let refresh_exp = (now + refresh_expires_in).timestamp() as usize;
@@ -163,11 +163,9 @@ fn generate_tokens_and_response(
         sstamp: user.security_stamp,
     };
     let jwt_refresh_secret = env.secret("JWT_REFRESH_SECRET")?.to_string();
-    let refresh_token = encode(
-        &Header::default(),
-        &refresh_claims,
-        &EncodingKey::from_secret(jwt_refresh_secret.as_ref()),
-    )?;
+    let refresh_key: Hmac<Sha256> = Hmac::new_from_slice(jwt_refresh_secret.as_bytes())
+        .map_err(|_| AppError::Internal)?;
+    let refresh_token = refresh_claims.sign_with_key(&refresh_key)?;
 
     let has_master_password = !user.master_password_hash.is_empty();
     let master_password_unlock = if has_master_password {
@@ -422,7 +420,7 @@ pub async fn token(
                         // Store or update remember token
                         query!(
                             &db,
-                            "INSERT INTO twofactor (uuid, user_uuid, atype, enabled, data, last_used) 
+                            "INSERT INTO twofactor (uuid, user_uuid, atype, enabled, data, last_used)
                              VALUES (?1, ?2, ?3, 1, ?4, 0)
                              ON CONFLICT(user_uuid, atype) DO UPDATE SET data = ?4",
                             uuid::Uuid::new_v4().to_string(),
@@ -491,14 +489,19 @@ pub async fn token(
                 .ok_or_else(|| AppError::BadRequest("Missing refresh_token".to_string()))?;
 
             let jwt_refresh_secret = env.secret("JWT_REFRESH_SECRET")?.to_string();
-            let token_data = decode::<RefreshClaims>(
-                &refresh_token,
-                &DecodingKey::from_secret(jwt_refresh_secret.as_ref()),
-                &jwt_validation(),
-            )
-            .map_err(|_| AppError::Unauthorized("Invalid refresh token".to_string()))?;
+            let key: Hmac<Sha256> = Hmac::new_from_slice(jwt_refresh_secret.as_bytes())
+                .map_err(|_| AppError::Internal)?;
 
-            let user_id = token_data.claims.sub;
+            let token_data: RefreshClaims = refresh_token.verify_with_key(&key)
+                .map_err(|_| AppError::Unauthorized("Invalid refresh token".to_string()))?;
+
+            // Manual expiration check
+            let now = Utc::now().timestamp() as usize;
+            if token_data.exp < now {
+                 return Err(AppError::Unauthorized("Refresh token expired".to_string()));
+            }
+
+            let user_id = token_data.sub;
             let user: Value = db
                 .prepare("SELECT * FROM users WHERE id = ?1")
                 .bind(&[user_id.into()])?
@@ -509,7 +512,7 @@ pub async fn token(
             let user: User = serde_json::from_value(user).map_err(|_| AppError::Internal)?;
 
             if !constant_time_eq(
-                token_data.claims.sstamp.as_bytes(),
+                token_data.sstamp.as_bytes(),
                 user.security_stamp.as_bytes(),
             ) {
                 return Err(AppError::Unauthorized("Invalid refresh token".to_string()));

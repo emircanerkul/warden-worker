@@ -3,9 +3,10 @@ use axum::{
     http::{header, request::Parts},
 };
 use constant_time_eq::constant_time_eq;
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use hmac::{Hmac, Mac};
+use jwt::VerifyWithKey;
+use sha2::Sha256;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::sync::Arc;
 use worker::Env;
 
@@ -26,19 +27,6 @@ pub struct Claims {
     pub email: String,
     pub email_verified: bool,
     pub amr: Vec<String>,
-}
-
-pub(crate) fn jwt_validation() -> Validation {
-    let mut required_spec_claims = HashSet::new();
-    required_spec_claims.insert("exp".to_string());
-
-    let mut validation = Validation::new(Algorithm::HS256);
-    validation.required_spec_claims = required_spec_claims;
-    validation.leeway = JWT_VALIDATION_LEEWAY_SECS;
-    validation.validate_exp = true;
-    validation.validate_nbf = true;
-    validation.algorithms = vec![Algorithm::HS256];
-    validation
 }
 
 /// AuthUser extractor - provides (user_id, email) tuple
@@ -69,12 +57,24 @@ impl FromRequestParts<Arc<Env>> for Claims {
 
         let secret = state.secret("JWT_SECRET")?;
 
-        // Decode and validate the token
-        let decoding_key = DecodingKey::from_secret(secret.to_string().as_ref());
-        let token_data = decode::<Claims>(&token, &decoding_key, &jwt_validation())
+        // Verify and decode the token
+        let secret_str = secret.to_string();
+        let key: Hmac<Sha256> = Hmac::new_from_slice(secret_str.as_bytes())
+            .map_err(|_| AppError::Unauthorized("Invalid key configuration".to_string()))?;
+
+        let claims: Claims = token.verify_with_key(&key)
             .map_err(|_| AppError::Unauthorized("Invalid token".to_string()))?;
 
-        let claims = token_data.claims;
+        // Manual validation
+        let now = (worker::Date::now().as_millis() as u64) / 1000;
+
+        if (claims.exp as u64) + JWT_VALIDATION_LEEWAY_SECS < now {
+            return Err(AppError::Unauthorized("Token expired".to_string()));
+        }
+
+        if (claims.nbf as u64) > now + JWT_VALIDATION_LEEWAY_SECS {
+            return Err(AppError::Unauthorized("Token not yet valid".to_string()));
+        }
 
         let db = db::get_db(state)?;
         let current_sstamp = db

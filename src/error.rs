@@ -28,7 +28,7 @@ pub enum AppError {
     Crypto(String),
 
     #[error(transparent)]
-    JsonWebToken(#[from] jsonwebtoken::errors::Error),
+    JsonWebToken(#[from] jwt::Error),
 
     #[error("Internal server error")]
     Internal,

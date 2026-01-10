@@ -6,7 +6,9 @@ use axum::{
     Extension, Json,
 };
 use chrono::Utc;
-use jsonwebtoken::{encode, EncodingKey, Header};
+use hmac::{Hmac, Mac};
+use jwt::SignWithKey;
+use sha2::Sha256;
 use log;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -764,12 +766,10 @@ fn build_upload_download_token(
     };
 
     let secret = jwt_secret(env)?;
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .map_err(AppError::from)
+    let key: Hmac<Sha256> = Hmac::new_from_slice(secret.as_bytes())
+        .map_err(|_| AppError::Internal)?;
+
+    claims.sign_with_key(&key).map_err(AppError::from)
 }
 
 fn upload_url(
