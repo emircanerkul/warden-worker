@@ -169,19 +169,24 @@ fn generate_tokens_and_response(
 
     let has_master_password = !user.master_password_hash.is_empty();
     let master_password_unlock = if has_master_password {
-        Some(serde_json::json!({
-            "Kdf": {
-                "KdfType": user.kdf_type,
-                "Iterations": user.kdf_iterations,
-                "Memory": user.kdf_memory,
-                "Parallelism": user.kdf_parallelism
-            },
-            // This field is named inconsistently and will be removed and replaced by the "wrapped" variant in the apps.
-            // https://github.com/bitwarden/android/blob/release/2025.12-rc41/network/src/main/kotlin/com/bitwarden/network/model/MasterPasswordUnlockDataJson.kt#L22-L26
-            "MasterKeyEncryptedUserKey": user.key,
-            "MasterKeyWrappedUserKey": user.key,
-            "Salt": user.email
-        }))
+            let mut kdf_params = serde_json::Map::new();
+            kdf_params.insert("KdfType".to_string(), serde_json::json!(user.kdf_type));
+            kdf_params.insert("Iterations".to_string(), serde_json::json!(user.kdf_iterations));
+            if let Some(memory) = user.kdf_memory {
+                kdf_params.insert("Memory".to_string(), serde_json::json!(memory));
+            }
+            if let Some(parallelism) = user.kdf_parallelism {
+                kdf_params.insert("Parallelism".to_string(), serde_json::json!(parallelism));
+            }
+
+            Some(serde_json::json!({
+                "Kdf": kdf_params,
+                // This field is named inconsistently and will be removed and replaced by the "wrapped" variant in the apps.
+                // https://github.com/bitwarden/android/blob/release/2025.12-rc41/network/src/main/kotlin/com/bitwarden/network/model/MasterPasswordUnlockDataJson.kt#L22-L26
+                "MasterKeyEncryptedUserKey": user.key,
+                "MasterKeyWrappedUserKey": user.key,
+                "Salt": user.email
+            }))
     } else {
         None
     };
